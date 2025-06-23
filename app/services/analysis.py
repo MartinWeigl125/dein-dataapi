@@ -4,6 +4,8 @@ from fastapi.responses import JSONResponse
 from ..db.database import get_readings_for_device
 from ..db.weatherdata import get_current_temperature
 from ..models.models import Temperature
+import numpy as np
+from scipy.stats import linregress
 
 
 def analyze_device_status(device_id: int):
@@ -30,24 +32,20 @@ def analyze_device_status(device_id: int):
 
     set_temps = [r["set_temperature"] for r in readings]
     actual_temps = [r["actual_temperature"] for r in readings]
-    timestamps = [datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00")) for r in readings]
+    # timestamps = [datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00")) for r in readings]
 
     latest_set = set_temps[-1]
     latest_actual = actual_temps[-1]
 
-    # === Trendanalyse ===
-    trend_positive = abs(latest_set - latest_actual) < abs(set_temps[0] - actual_temps[0])
+    # mit Linearer Regression herausfinden, ob sich die aktuelle Temperatur der eingestellten annähert
+    slope, _, _, _, _ = linregress(range(len(actual_temps)), actual_temps)
+    trend_positive = bool(slope > 0) if latest_set > latest_actual else bool(slope < 0)
 
-    # === Stabilität prüfen ===
-    temp_diffs = [abs(s - a) for s, a in zip(set_temps, actual_temps)]
-    max_deviation = max(temp_diffs)
-    avg_deviation = sum(temp_diffs) / len(temp_diffs)
-
-    # === Zieltemperaturänderung? ===
+    # Wurde die eingestellte Temperatur geändert? Wann?
     setpoint_changed = len(set(set_temps)) > 1
     change_index = next((i for i in range(1, len(set_temps)) if set_temps[i] != set_temps[i-1]), None)
 
-    # === Dynamikprüfung nach Setpoint-Änderung ===
+    # Hat sich die aktuelle Temperatur nach dem Umstellen in die richtige Richtung entwickelt?
     if setpoint_changed and change_index:
         t_before = actual_temps[change_index - 1]
         t_after = actual_temps[-1]
@@ -57,25 +55,38 @@ def analyze_device_status(device_id: int):
     else:
         responded = None
 
-    # === Heizarbeitsabschätzung ===
+    # === Stabilität und Heizarbeitsabschätzung ===
+    temp_diffs = [abs(s - a) for s, a in zip(set_temps, actual_temps)]
+    max_deviation = max(temp_diffs)
+    avg_deviation = sum(temp_diffs) / len(temp_diffs)
+
     heating_effort = sum(
         max(0, s - a) for s, a in zip(set_temps, actual_temps)
     ) / len(readings)
 
-    # === Außentemperatur einbeziehen ===
-    outside_now = temperature.last_temp  # real gemessen vor einer Stunde
+    # Außentemperatur einbeziehen
+    outside_now = temperature.last_temp
     temp_diff_outside = latest_actual - outside_now
 
     tips = []
 
+    # Verhältnis Außen-/Innenklima bewerten
     if latest_actual > latest_set + 1 and temp_diff_outside > 2:
-        tips.append("Fenster öffnen – Raum überheizt, draußen ist es kühler.")
+        tips.append("Fenster öffnen - Raum überheizt, draußen ist es kühler.")
     elif latest_actual < latest_set - 1 and outside_now > latest_set:
-        tips.append("Rollläden schließen – starker Wärmeeintrag von außen.")
+        tips.append("Rollläden schließen - starker Wärmeeintrag von außen.")
     elif abs(temp_diff_outside) < 0.5:
-        tips.append("Außen- und Innentemperatur sind ähnlich – natürliche Lüftung möglich.")
+        tips.append("Außen- und Innentemperatur sind ähnlich - natürliche Lüftung möglich.")
     elif latest_actual < 20 and outside_now < 15:
-        tips.append("Fenster besser geschlossen halten – es ist draußen deutlich kälter.")
+        tips.append("Fenster besser geschlossen halten - es ist draußen deutlich kälter.")
+
+    # Überprüfe, ob die eingestellte Temperatur zu warm oder zu kalt ist
+    if latest_set > 24 or latest_set < 18:
+        tips.append("Zieltemperatur außerhalb der gängigen Raumtemperatur (18-24 °C).")
+
+    # Ausreißer erkennen mit Standardabweichung
+    if np.std(actual_temps) > 1.5:
+        tips.append("Starke Temperaturschwankungen - prüfen Sie Fenster oder Thermostat.")
 
     # === Bewertung ===
     if max_deviation > 2 and not setpoint_changed:
@@ -111,5 +122,4 @@ def analyze_device_status(device_id: int):
         },
         "tips": tips
     }
-
 

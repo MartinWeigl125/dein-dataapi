@@ -3,3 +3,5 @@ supabase
 uvicorn[standard]
 httpx
 pydantic
+scipy
+numpy
